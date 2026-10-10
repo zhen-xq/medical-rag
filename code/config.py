@@ -16,10 +16,16 @@ class MedicalRAGConfig:
 
     # 模型配置
     embedding_model: str = "BAAI/bge-small-zh-v1.5" 
-    llm_model: str = "glm-5.3-flash"
+    llm_model: str = "deepseek-v4-flash"
 
     # 检索配置
     top_k: int = 3 # 给llm3段学习资料
+    rerank_enabled: bool = True
+    reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    rerank_candidate_k: int = 20
+    rerank_batch_size: int = 4
+    rerank_max_chars: int = 1500
+    reranker_device: str | None = None  # None 时由 sentence-transformers 自动选择设备
 
     # 生成配置
     temperature: float = 0.3 # 回答随机程度

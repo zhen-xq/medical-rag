@@ -5,7 +5,7 @@
 
 ### 类成员
 ```python
-self.model_name = "glm-5.3-flash"
+self.model_name = "deepseek-v4-flash"
 self.temperature = 0.3
 self.max_tokens = 2048
 self.llm: ChatOpenAI | None
@@ -22,8 +22,8 @@ import os
 load_dotenv()
 
 self.llm = ChatOpenAI(
-    api_key=os.getenv("AIHUBMIX_API_KEY"),
-    base_url="https://aihubmix.com/v1",
+    api_key=os.getenv("BUPT_API_KEY"),
+    base_url="https://myai.bupt.edu.cn/llm-gw/v1",
     model=self.model_name,
     temperature=self.temperature,
     max_tokens=self.max_tokens

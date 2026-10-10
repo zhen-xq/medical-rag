@@ -2,6 +2,7 @@
 检索优化模块 - 向量+BM25双路检索与RRF融合排序
 """
 
+import re
 import warnings
 from typing import List, Dict, Any
 
@@ -20,12 +21,53 @@ class RetrievalOptimizationModule:
     # =============================================================
     # 检索阶段的常量化配置（与 03_index_retrieval.md 文档一致）
     # =============================================================
-    VECTOR_RETRIEVER_K = 15   # FAISS 向量检索单独先拿 top 15 候选
-    BM25_RETRIEVER_K   = 15   # BM25 关键词检索单独先拿 top 15 候选
+    VECTOR_RETRIEVER_K = 30   # FAISS 向量检索单独先拿 top 30 候选，供后续精排
+    BM25_RETRIEVER_K   = 30   # BM25 关键词检索单独先拿 top 30 候选，供后续精排
     RRF_K              = 60   # RRF 公式平滑系数 k（参考实现同样取 60，经验值）
-    FILTER_MULTIPLIER  = 3    # metadata_filtered_search 先拿 top_k*3 多候选再 Python 侧过滤，避免直接被筛空
 
-    def __init__(self, vectorstore: FAISS, chunks: List[Document]):
+    @staticmethod
+    def _chinese_bm25_tokenize(text: str) -> List[str]:
+        """
+        为 BM25 提供无第三方依赖的中文分词。
+
+        LangChain 默认使用 text.split()，只适合以空格分词的语言；中文资料没有空格时，
+        一整段内容会退化成一个 token，查询几乎无法产生关键词匹配。
+
+        这里对连续中文生成「单字 + 双字词组」两类 token：
+          "青光眼常见症状" → ["青", "光", "眼", ..., "青光", "光眼", "眼常", ...]
+        单字保证短术语也能召回，双字词组让“青光眼”“斜视”“弱视”等连续术语有更高区分度。
+        英文、数字和缩写保留为 token，适用于 OCT、IOL、视力数值等检索词。
+        """
+        if not text:
+            return []
+
+        segments = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9]+", text.lower())
+        tokens: List[str] = []
+
+        for segment in segments:
+            if re.fullmatch(r"[\u4e00-\u9fff]+", segment):
+                chars = list(segment)
+                tokens.extend(chars)
+                tokens.extend(
+                    segment[index:index + 2]
+                    for index in range(len(segment) - 1)
+                )
+            else:
+                tokens.append(segment)
+
+        return tokens
+
+    def __init__(
+        self,
+        vectorstore: FAISS,
+        chunks: List[Document],
+        rerank_enabled: bool = True,
+        reranker_model: str = "Qwen/Qwen3-Reranker-0.6B",
+        rerank_candidate_k: int = 20,
+        rerank_batch_size: int = 8,
+        rerank_max_chars: int = 1500,
+        reranker_device: str | None = None,
+    ):
         """
         初始化检索优化模块（完全仿照参考：保存 vectorstore 和 chunks，然后立刻调用 setup_retrievers）
 
@@ -52,6 +94,13 @@ class RetrievalOptimizationModule:
         # =============================================================
         self.vectorstore = vectorstore
         self.chunks = chunks
+        self.rerank_enabled = rerank_enabled
+        self.reranker_model_name = reranker_model
+        self.rerank_candidate_k = max(1, rerank_candidate_k)
+        self.rerank_batch_size = max(1, rerank_batch_size)
+        self.rerank_max_chars = max(1, rerank_max_chars)
+        self.reranker_device = reranker_device
+        self._reranker = None
 
         # =============================================================
         # ③ 立刻调用 setup_retrievers（跟参考实现一模一样：__init__ 里直接完成初始化，
@@ -59,15 +108,57 @@ class RetrievalOptimizationModule:
         # =============================================================
         self.setup_retrievers()
 
+    def _load_reranker(self):
+        """按需加载 CrossEncoder，避免仅建库或只做基线评测时下载/占用重排模型。"""
+        if self._reranker is not None:
+            return self._reranker
+
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as e:
+            raise ImportError(
+                "启用了 rerank，但缺少 sentence-transformers。请执行 pip install -r requirements.txt。"
+            ) from e
+
+        resolved_device = self._resolve_reranker_device()
+        print(
+            f"[RetrievalOptimization] 正在加载重排模型：{self.reranker_model_name} "
+            f"(device={resolved_device}, batch_size={self.rerank_batch_size})"
+        )
+        try:
+            self._reranker = CrossEncoder(
+                self.reranker_model_name,
+                device=resolved_device,
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"重排模型加载失败：{self.reranker_model_name}。"
+                "请检查本地模型缓存、网络访问、transformers/sentence-transformers 版本及可用显存。"
+            ) from e
+
+        print("[RetrievalOptimization] 重排模型加载完成")
+        return self._reranker
+
+    def _resolve_reranker_device(self) -> str:
+        """优先使用显式设备；未配置时自动选择 CUDA，无法使用时回退 CPU。"""
+        if self.reranker_device:
+            return self.reranker_device
+        try:
+            import torch
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+
     def setup_retrievers(self):
         """
-        设置向量检索器和 BM25 检索器（完全仿照参考实现，只是把 k 从 5 改成 15 跟架构文档一致）
+        设置向量检索器和 BM25 检索器；两路各保留 30 条候选，供 RRF 与模型精排使用。
         结果写进成员变量：
-          - self.vector_retriever：FAISS 的 similarity 向量检索器，k=15
-          - self.bm25_retriever：BM25Retriever（基于 self.chunks 建的关键词倒排索引），k=15
+          - self.vector_retriever：FAISS 的 similarity 向量检索器，k=30
+          - self.bm25_retriever：BM25Retriever（基于 self.chunks 建的关键词倒排索引），k=30
         """
         # =============================================================
-        # ① 向量检索器：用 self.vectorstore.as_retriever(...)，search_type="similarity" + search_kwargs k=15
+        # ① 向量检索器：用 self.vectorstore.as_retriever(...)，search_type="similarity" + search_kwargs k=30
         #    说明：as_retriever() 包装后可以统一 invoke(query) 接口，后面 hybrid_search 两个检索器都用 .invoke() 调用即可（跟参考一样）
         # =============================================================
         self.vector_retriever = self.vectorstore.as_retriever(
@@ -76,14 +167,15 @@ class RetrievalOptimizationModule:
         )
 
         # =============================================================
-        # ② BM25 关键词检索器：BM25Retriever.from_documents(self.chunks, k=15)
-        #    说明：from_documents 会对所有 chunk 的 page_content 做中文分词（内部默认是 jieba-like 的字符 n-gram + 通用 tokenizer，
-        #    对中文还行，后续你要升级成专门中文分词（jieba）再换；当前完全照着参考实现来，不引入额外依赖）
+        # ② BM25 关键词检索器：显式传入中文 tokenizer。
+        #    LangChain 默认仅 text.split()，中文无空格会导致整段文本成为单一 token，
+        #    因此必须使用 _chinese_bm25_tokenize 才能让关键词检索真正参与 RRF 融合。
         # =============================================================
         try:
             self.bm25_retriever = BM25Retriever.from_documents(
                 self.chunks,
                 k=self.BM25_RETRIEVER_K,
+                preprocess_func=self._chinese_bm25_tokenize,
             )
         except ImportError as e:
             print(
@@ -94,33 +186,64 @@ class RetrievalOptimizationModule:
             )
             raise
 
+    def _hybrid_retrieve(self, query: str) -> List[Document]:
+        """执行双路召回和 RRF，只返回完整融合候选池，不在此处截断或调用重排模型。"""
+        vector_docs = self.vector_retriever.invoke(query)
+        bm25_docs = self.bm25_retriever.invoke(query)
+        return self._rrf_rerank(vector_docs, bm25_docs)
+
+    def rerank(self, query: str, candidates: List[Document], top_k: int) -> List[Document]:
+        """以 CrossEncoder 对 query-document 对逐对评分，返回模型相关性最高的 top_k。"""
+        if not candidates or top_k <= 0:
+            return []
+
+        limited_candidates = candidates[:self.rerank_candidate_k]
+        reranker = self._load_reranker()
+        pairs = [
+            (query, doc.page_content[:self.rerank_max_chars])
+            for doc in limited_candidates
+        ]
+        try:
+            scores = reranker.predict(pairs, batch_size=self.rerank_batch_size)
+        except Exception as e:
+            raise RuntimeError("重排模型推理失败，请检查设备内存和 rerank_batch_size 配置。") from e
+
+        ranked = sorted(
+            zip(limited_candidates, scores),
+            key=lambda item: float(item[1]),
+            reverse=True,
+        )
+        reranked_docs = []
+        for doc, score in ranked[:top_k]:
+            new_meta = dict(doc.metadata)
+            new_meta["_rerank_score"] = round(float(score), 8)
+            try:
+                new_doc = doc.copy()
+                new_doc.metadata = new_meta
+            except Exception:
+                new_doc = Document(page_content=doc.page_content, metadata=new_meta)
+            reranked_docs.append(new_doc)
+        return reranked_docs
+
+    def _finalize_results(self, query: str, candidates: List[Document], top_k: int) -> List[Document]:
+        """根据配置选择 RRF 直出或 RRF 后模型精排。"""
+        if self.rerank_enabled:
+            return self.rerank(query, candidates, top_k)
+        return candidates[:top_k]
+
     def hybrid_search(self, query: str, top_k: int = 3) -> List[Document]:
         """
-        混合检索 - 结合向量检索（语义相似）和 BM25 检索（字面关键词相似），使用 RRF 融合重排，最后切 top_k
-        完全仿照参考实现的 3 步流：vector_retriever.invoke → bm25_retriever.invoke → _rrf_rerank → 切片。
+        混合检索 - 结合向量检索、BM25、RRF 融合，并可选调用 CrossEncoder 精排。
 
         Args:
             query: 用户的原始查询文本（如 "青光眼有什么症状？"）
             top_k: 最终返回结果数量（架构文档约定默认 top_k=3）
 
         Returns:
-            List[Document] —— RRF 重排后的前 top_k 个 chunk，每个 doc.metadata["_rrf_score"] 里带 RRF 融合分数
+            List[Document] —— 最终前 top_k 个 chunk；始终带 _rrf_score，启用精排时额外带 _rerank_score
         """
-        # =============================================================
-        # ① 分别跑向量检索和 BM25 检索（两个独立，将来甚至可以线程池并行，这里先按参考顺序跑）
-        # =============================================================
-        vector_docs = self.vector_retriever.invoke(query)
-        bm25_docs   = self.bm25_retriever.invoke(query)
-
-        # =============================================================
-        # ② RRF 融合重排
-        # =============================================================
-        reranked_docs = self._rrf_rerank(vector_docs, bm25_docs)
-
-        # =============================================================
-        # ③ 切 top_k 返回（不够就返回多少，不要补空/崩）
-        # =============================================================
-        return reranked_docs[:top_k]
+        candidates = self._hybrid_retrieve(query)
+        return self._finalize_results(query, candidates, top_k)
 
     def metadata_filtered_search(self, query: str, filters: Dict[str, Any], top_k: int = 5) -> List[Document]:
         """
@@ -150,15 +273,16 @@ class RetrievalOptimizationModule:
             return self.hybrid_search(query, top_k=top_k)
 
         # =============================================================
-        # ② 先 hybrid_search 拿 FILTER_MULTIPLIER * top_k 多条候选（默认 3 倍 = 15 条）再过滤
-        #    （如果先 filter 再搜的话 FAISS 内部 filter 不同版本坑多，Python 侧过滤简单稳，跟参考一致）
+        # ② 先获得完整 RRF 融合池，再 Python 侧过滤；这样严格过滤不会受最终 top_k 截断影响。
         # =============================================================
-        candidates = self.hybrid_search(query, top_k=top_k * self.FILTER_MULTIPLIER)
+        # 先在完整 RRF 候选池中筛选，再调用重排模型；这样重排不会浪费在最终会被过滤掉的片段上。
+        candidates = self._hybrid_retrieve(query)
 
         # =============================================================
         # ③ Python 侧逐个 candidate 应用 filters（多 key and 语义；value 为 list 则 any 命中即算匹配）
         # =============================================================
         filtered_docs = []
+        candidate_limit = max(top_k, self.rerank_candidate_k) if self.rerank_enabled else top_k
         for doc in candidates:
             match = True
             for key, value in filters.items():
@@ -180,11 +304,11 @@ class RetrievalOptimizationModule:
 
             if match:
                 filtered_docs.append(doc)
-                # --- 提前终止：已经凑够 top_k 条就不用再遍历了（省一点点时间）---
-                if len(filtered_docs) >= top_k:
+                # 启用精排时保留足够候选，避免模型只能在最终 top_k 条中重新排序。
+                if len(filtered_docs) >= candidate_limit:
                     break
 
-        return filtered_docs
+        return self._finalize_results(query, filtered_docs, top_k)
 
     def _rrf_rerank(self, vector_docs: List[Document], bm25_docs: List[Document], k: int = RRF_K) -> List[Document]:
         """
@@ -195,8 +319,8 @@ class RetrievalOptimizationModule:
         RRF 分数写到每个返回 doc.metadata["_rrf_score"] 里，方便后面调试/打印/做二次重排。
 
         Args:
-            vector_docs: FAISS 向量检索结果（长度 VECTOR_RETRIEVER_K=15）
-            bm25_docs:   BM25 关键词检索结果（长度 BM25_RETRIEVER_K=15）
+            vector_docs: FAISS 向量检索结果（长度 VECTOR_RETRIEVER_K=30）
+            bm25_docs:   BM25 关键词检索结果（长度 BM25_RETRIEVER_K=30）
             k:           RRF 平滑系数（默认 60，和参考一致）
 
         Returns:

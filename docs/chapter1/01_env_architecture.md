@@ -11,9 +11,9 @@ pip install -r requirements.txt
 
 ## 2. API配置
 
-复制 `.env.example` → `.env`，填入：
+复制 `.env.example` → `.env`，填入（校外访问请先连北邮 VPN）：
 ```
-AIHUBMIX_API_KEY=sk-xxx
+BUPT_API_KEY=sk-xxx
 ```
 
 ## 3. 架构总览（5步流水线）

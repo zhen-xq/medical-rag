@@ -6,7 +6,7 @@ import os
 from typing import List, Dict, Any
 
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langchain_openai import ChatOpenAI                       # AIHUBMIX 提供 OpenAI 兼容 API
+from langchain_openai import ChatOpenAI                       # 北邮 API 提供 OpenAI 兼容 API
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -15,7 +15,7 @@ from langchain_core.output_parsers import StrOutputParser
 class GenerationIntegrationModule:
     """生成集成模块 - 负责查询路由、查询重写和 5 路由眼科/视光回答生成"""
 
-    def __init__(self, model_name: str = "glm-5.3-flash",
+    def __init__(self, model_name: str = "deepseek-v4-flash",
                  temperature: float = 0.3, max_tokens: int = 2048):
         # =============================================================
         # ① 参数记录（temperature 锁 0.3，外部传更高/更低也无效——已在 __init__ 默认值锁死）
@@ -32,7 +32,7 @@ class GenerationIntegrationModule:
 
     def setup_llm(self):
         """
-        初始化大语言模型（用 AIHUBMIX 的 OpenAI 兼容接口）。
+        初始化大语言模型（用北邮 API 的 OpenAI 兼容接口）。
         幂等：self.llm 已存在则直接 return（避免重复 new 浪费资源）。
         """
         # =============================================================
@@ -42,25 +42,26 @@ class GenerationIntegrationModule:
             return
 
         # =============================================================
-        # ② 取 AIHUBMIX_API_KEY（用户 04_doc 指定的默认 LLM 提供商）
+        # ② 取 BUPT_API_KEY（北邮校内大模型网关）
         # =============================================================
-        api_key = os.getenv("AIHUBMIX_API_KEY")
+        api_key = os.getenv("BUPT_API_KEY")
         if not api_key:
             # 中文错误提示：告诉用户从 .env.example 复制并填 key
             print(
-                "[ERROR][GenerationIntegrationModule.setup_llm] 未找到 AIHUBMIX_API_KEY 环境变量。\n"
+                "[ERROR][GenerationIntegrationModule.setup_llm] 未找到 BUPT_API_KEY 环境变量。\n"
                 "         请从 code/.env.example 复制成 .env，填入你的 API Key；\n"
-                "         或者手动在 shell 里 set AIHUBMIX_API_KEY=xxx 后再运行。"
+                "         或者手动在 shell 里 set BUPT_API_KEY=xxx 后再运行；\n"
+                "         校外访问请先连接北邮 VPN。"
             )
             raise ValueError(
-                "[GenerationIntegrationModule.setup_llm] 缺少 AIHUBMIX_API_KEY 环境变量，"
-                "无法实例化 glm-5.3-flash。请检查 code/.env 配置。"
+                "[GenerationIntegrationModule.setup_llm] 缺少 BUPT_API_KEY 环境变量，"
+                "无法实例化 deepseek-v4-flash。请检查 code/.env 配置。"
             )
 
         # =============================================================
-        # ③ 实例化 ChatOpenAI（AIHUBMIX 的 base_url = https://aihubmix.com/v1，完全兼容 OpenAI 协议）
+        # ③ 实例化 ChatOpenAI（北邮 base_url = https://myai.bupt.edu.cn/llm-gw/v1，完全兼容 OpenAI 协议）
         #    关键参数：
-        #      - model = glm-5.3-flash（性价比高，练手够用）
+        #      - model = deepseek-v4-flash（北邮官方示例模型）
         #      - temperature = 0.3（用户硬约束）
         #      - max_tokens = 2048（回答长度上限）
         # =============================================================
@@ -69,7 +70,7 @@ class GenerationIntegrationModule:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             api_key=api_key,
-            base_url="https://aihubmix.com/v1",
+            base_url="https://myai.bupt.edu.cn/llm-gw/v1",
         )
 
         print(f"[GenerationIntegrationModule.setup_llm] ✅ LLM 初始化成功：model={self.model_name}, temperature={self.temperature}")
@@ -77,10 +78,11 @@ class GenerationIntegrationModule:
     # =============================================================
     # 【通用工具方法】_build_context
     # =============================================================
-    def _build_context(self, docs: List[Document], max_chars: int = 2000) -> str:
+    def _build_context(self, docs: List[Document], max_chars: int = 6000) -> str:
         """
-        把命中的父文档列表拼成 LLM 能吃的「上下文字符串」。
-        循环 docs → 每条拼元数据信息+文本 → 超 max_chars 截断。
+        把命中的检索块列表拼成 LLM 能吃的「上下文字符串」。
+        优先保留 RRF 排名靠前的块；最后一个超出预算的块会被截断后加入，
+        保证不会因为一段资料过长而导致整个上下文为空。
         元数据用我们的 8 字段（doc_title/source_level/category/sub_category/doc_type/difficulty），
         不打印面向用户的提示，只做字符串拼接。
         """
@@ -107,17 +109,26 @@ class GenerationIntegrationModule:
                 header_parts.append(f" | 类型: {meta['doc_type']}")
             if meta.get("difficulty"):
                 header_parts.append(f" | 难度: {meta['difficulty']}")
+            if meta.get("section"):
+                header_parts.append(f" | 章节: {meta['section']}")
+            if isinstance(meta.get("_rrf_score"), (int, float)):
+                header_parts.append(f" | RRF: {meta['_rrf_score']:.8f}")
             header_line = "".join(header_parts)
 
             # =============================================================
-            # ② 拼完整文档块（头 + 正文）
+            # ② 拼命中块（头 + 正文）；正文来自检索结果，而不是整本父文档
             # =============================================================
             doc_text = f"{header_line}\n{doc.page_content.strip()}\n"
 
             # =============================================================
-            # ③ 字符数超限就停止追加（后面的资料精度更低，截断不影响效果）
+            # ③ 预算不足时，截取当前块的剩余部分再结束。
+            #    旧逻辑直接 break：如果第一份父文档超过 2,000 字，会导致 context 为空。
             # =============================================================
             if current_chars + len(doc_text) > max_chars:
+                remaining = max_chars - current_chars
+                if remaining > len(header_line) + 20:
+                    truncated_content = doc.page_content.strip()[:remaining - len(header_line) - 2]
+                    context_parts.append(f"{header_line}\n{truncated_content}\n")
                 break
             context_parts.append(doc_text)
             current_chars += len(doc_text)

@@ -12,18 +12,18 @@ class DataPreparationModule:
     """数据准备模块 - 负责医疗文档加载、元数据增强和分块处理"""
 
     def __init__(self, data_path: str):
-        # ===== 把传入的路径字符串转成 Path 对象（方便后面 rglob / parent 等操作）
+        # 把传入的路径字符串转成 Path 对象（方便后面 rglob / parent 等操作）
         self.data_path = Path(data_path).resolve()
 
-        # ===== 父文档容器：一份 md 就是一个 Document（后续"大块生成"就靠它，不切分）
+        # 父文档容器：一份 md 就是一个 Document（后续"大块生成"，不切分）
         self.documents: List[Document] = []
 
-        # ===== 子文档容器：按 Markdown 标题 / 字符长度切出来的"小块"
+        # 子文档容器：按 Markdown 标题 / 字符长度切出来的"小块"
         # 真正被丢进 FAISS 做向量索引的就是这些子块（小块检索 → 大块生成）
         self.chunks: List[Document] = []
 
-        # ===== 父子映射：key = 子块 chunk_id（str）, value = 父文档 parent_id（str）
-        # O(1) 时间通过子块反查回父文档（hit_count 去重就靠它）
+        #  父子映射：key = 子块 chunk_id（str）, value = 父文档 parent_id（str）
+        # O(1) 时间通过子块反查回父文档（hit_count 去重）
         self.parent_child_map: Dict[str, str] = {}
 
     def load_documents(self) -> List[Document]:

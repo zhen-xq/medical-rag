@@ -1,0 +1,122 @@
+[
+  {
+    "id": "blindness_definition",
+    "query": "什么是盲人？",
+    "expected": [
+      {
+        "doc_title": "眼视光公共卫生学第3版",
+        "section_contains": "盲和视觉损伤的标准"
+      }
+    ],
+    "note": "基于已人工核验的资料章节，用于验证‘盲人定义’类问题是否召回视觉损伤标准。"
+  },
+  {
+    "id": "glaucoma_symptoms",
+    "query": "青光眼有哪些常见症状和表现？",
+    "expected": [
+      {"doc_title": "青光眼"}
+    ],
+    "note": "疾病专题问题应优先召回青光眼专著。"
+  },
+  {
+    "id": "low_vision_definition",
+    "query": "什么是低视力？低视力患者有哪些特点？",
+    "expected": [
+      {"doc_title": "低视力学第3版"}
+    ],
+    "note": "低视力定义与康复问题应召回低视力学教材。"
+  },
+  {
+    "id": "visual_public_health",
+    "query": "眼视光公共卫生的主要内容是什么？",
+    "expected": [
+      {"doc_title": "眼视光公共卫生学第3版"}
+    ],
+    "note": "公共卫生主题的来源级检索测试。"
+  },
+  {
+    "id": "contact_lens_basics",
+    "query": "接触镜验配前需要了解哪些基础知识？",
+    "expected": [
+      {"doc_title": "接触镜学第3版"},
+      {"doc_title": "硬性角膜接触镜第2版"}
+    ],
+    "note": "普通接触镜与硬性角膜接触镜教材均可视为合理来源。"
+  },
+  {
+    "id": "rigid_contact_lens_fitting",
+    "query": "硬性角膜接触镜的验配要点有哪些？",
+    "expected": [
+      {"doc_title": "硬性角膜接触镜第2版"}
+    ],
+    "note": "特异性较高的硬性角膜接触镜验配主题。"
+  },
+  {
+    "id": "optometry_instruments",
+    "query": "眼视光检查常用器械有哪些，分别有什么用途？",
+    "expected": [
+      {"doc_title": "眼视光器械学第3版"}
+    ],
+    "note": "器械知识应优先命中眼视光器械学。"
+  },
+  {
+    "id": "spectacles_basics",
+    "query": "框架眼镜的基本结构和光学原理是什么？",
+    "expected": [
+      {"doc_title": "眼镜学第3版"}
+    ],
+    "note": "框架眼镜基础理论的来源级检索测试。"
+  },
+  {
+    "id": "visual_training",
+    "query": "视觉训练的基本原理和常见方法是什么？",
+    "expected": [
+      {"doc_title": "视觉训练的原理"}
+    ],
+    "note": "视觉训练主题应命中专项教材。"
+  },
+  {
+    "id": "binocular_vision",
+    "query": "什么是双眼视觉，双眼视觉异常如何理解？",
+    "expected": [
+      {"doc_title": "双眼视觉学第3版"},
+      {"doc_title": "临床双眼视觉学"}
+    ],
+    "note": "两本双眼视觉教材均为合理目标来源。"
+  },
+  {
+    "id": "strabismus_amblyopia",
+    "query": "斜视和弱视有哪些常见检查与治疗思路？",
+    "expected": [
+      {"doc_title": "斜视与弱视"},
+      {"doc_title": "斜视弱视学第2版"}
+    ],
+    "note": "斜视弱视专题的双来源检索测试。"
+  },
+  {
+    "id": "children_visual_development",
+    "query": "儿童视觉发育异常应如何识别和评估？",
+    "expected": [
+      {"doc_title": "儿童视觉发育诊断与治疗"},
+      {"doc_title": "儿童视光"}
+    ],
+    "note": "儿童视功能主题允许命中诊疗教材或儿童视光问答资料。"
+  },
+  {
+    "id": "optometrist_workflow",
+    "query": "视光师在门诊验光中的职责和工作流程是什么？",
+    "expected": [
+      {"doc_title": "视光师手册"},
+      {"doc_title": "门诊笔记"}
+    ],
+    "note": "门诊视光工作主题的来源级检索测试。"
+  },
+  {
+    "id": "spectacle_fitter_basics",
+    "query": "眼镜定配工需要掌握哪些基础知识？",
+    "expected": [
+      {"doc_title": "眼镜定配工（基础知识）"}
+    ],
+    "note": "职业技能基础知识的来源级检索测试。"
+  }
+]

@@ -53,8 +53,8 @@ class MedicalRAGSystem:
             raise FileNotFoundError(f"数据路径不存在: {self.config.data_path}")
 
         # 检查API密钥
-        if not os.getenv("AIHUBMIX_API_KEY"):
-            raise ValueError("请设置 AIHUBMIX_API_KEY 环境变量")
+        if not os.getenv("BUPT_API_KEY"):
+            raise ValueError("请设置 BUPT_API_KEY 环境变量")
 
     def initialize_system(self):
         """初始化所有模块"""
@@ -127,7 +127,16 @@ class MedicalRAGSystem:
 
         # 6. 初始化检索优化模块
         print("初始化检索优化...")
-        self.retrieval_module = RetrievalOptimizationModule(vectorstore, chunks)
+        self.retrieval_module = RetrievalOptimizationModule(
+            vectorstore,
+            chunks,
+            rerank_enabled=self.config.rerank_enabled,
+            reranker_model=self.config.reranker_model,
+            rerank_candidate_k=self.config.rerank_candidate_k,
+            rerank_batch_size=self.config.rerank_batch_size,
+            rerank_max_chars=self.config.rerank_max_chars,
+            reranker_device=self.config.reranker_device,
+        )
 
         # 7. 显示统计信息
         stats = self.data_module.get_statistics()
@@ -184,24 +193,30 @@ class MedicalRAGSystem:
                 rewritten_query, top_k=self.config.top_k
             )
 
-        # 显示检索到的子块信息（doc_title + section 或 内容片段）
+        # 显示检索到的子块信息（doc_title + section + RRF 分数），
+        # 便于观察相关资料是否被召回，以及融合排序是否合理。
         if relevant_chunks:
             chunk_info = []
             for chunk in relevant_chunks:
                 meta = chunk.metadata if isinstance(chunk.metadata, dict) else {}
                 doc_title = meta.get('doc_title', '未知文档')
                 section = meta.get('section', '')
+                rrf_score = meta.get('_rrf_score')
+                rerank_score = meta.get('_rerank_score')
+                score_text = f" [RRF={rrf_score:.8f}]" if isinstance(rrf_score, (int, float)) else ""
+                if isinstance(rerank_score, (int, float)):
+                    score_text += f" [rerank={rerank_score:.8f}]"
                 if section:
-                    chunk_info.append(f"{doc_title}({section})")
+                    chunk_info.append(f"{doc_title}({section}){score_text}")
                 else:
                     # 尝试从内容中提取章节标题（# 开头取第一行）
                     content_preview = chunk.page_content[:100].strip()
                     if content_preview.startswith('#'):
                         title_end = content_preview.find('\n') if '\n' in content_preview else len(content_preview)
                         section_title = content_preview[:title_end].replace('#', '').strip()
-                        chunk_info.append(f"{doc_title}({section_title})")
+                        chunk_info.append(f"{doc_title}({section_title}){score_text}")
                     else:
-                        chunk_info.append(f"{doc_title}(内容片段)")
+                        chunk_info.append(f"{doc_title}(内容片段){score_text}")
             print(f"找到 {len(relevant_chunks)} 个相关文档块: {', '.join(chunk_info)}")
         else:
             print(f"找到 {len(relevant_chunks)} 个相关文档块")
@@ -226,13 +241,14 @@ class MedicalRAGSystem:
             if doc_names:
                 print(f"找到文档: {', '.join(doc_names)}")
 
+            # 生成阶段使用真实命中的子块，避免把整本父文档塞进有限上下文后丢失关键章节。
             if stream:
-                return self.generation_module.generate_list_answer_stream(question, relevant_docs)
+                return self.generation_module.generate_list_answer_stream(question, relevant_chunks)
             else:
-                return self.generation_module.generate_list_answer(question, relevant_docs)
+                return self.generation_module.generate_list_answer(question, relevant_chunks)
         else:
-            # 详细查询：获取完整文档并生成详细回答
-            print("获取完整文档...")
+            # 子块用于生成，父文档只用于展示来源和诊断；这样既保留可追溯性，又不会稀释上下文。
+            print("获取命中文档来源...")
             relevant_docs = self.data_module.get_parent_documents(relevant_chunks)
 
             # 显示找到的文档名称
@@ -253,15 +269,15 @@ class MedicalRAGSystem:
             if route_type == "detail":
                 # 详细查询使用分步指导模式
                 if stream:
-                    return self.generation_module.generate_step_by_step_answer_stream(question, relevant_docs)
+                    return self.generation_module.generate_step_by_step_answer_stream(question, relevant_chunks)
                 else:
-                    return self.generation_module.generate_step_by_step_answer(question, relevant_docs)
+                    return self.generation_module.generate_step_by_step_answer(question, relevant_chunks)
             else:
                 # 一般查询使用基础回答模式
                 if stream:
-                    return self.generation_module.generate_basic_answer_stream(question, relevant_docs)
+                    return self.generation_module.generate_basic_answer_stream(question, relevant_chunks)
                 else:
-                    return self.generation_module.generate_basic_answer(question, relevant_docs)
+                    return self.generation_module.generate_basic_answer(question, relevant_chunks)
 
     def _extract_filters_from_query(self, query: str) -> dict:
         """
@@ -313,10 +329,13 @@ class MedicalRAGSystem:
                 ts_start = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 print(f"⏱️ [计时·开始] {ts_start}")
 
-                print("\n回答:")
                 if use_stream:
-                    # 流式输出：捕获第一个 chunk 到达视为「开始输出正式回答」，此时结束计时
+                    # ask_question 先完成路由、改写和检索；准备好流式生成器后再显示「回答」，
+                    # 避免用户在资料检索阶段看到空的回答区域。
                     stream_iter = self.ask_question(user_input, stream=True)
+                    print("\n回答:")
+
+                    # 流式输出：捕获第一个 chunk 到达视为「开始输出正式回答」，此时结束计时
                     first_chunk = True
                     for chunk in stream_iter:
                         if chunk is None:
@@ -345,7 +364,7 @@ class MedicalRAGSystem:
                     elapsed = t_end - t_start
                     print(f"⏱️ [计时·结束] {ts_end}  总耗时: {elapsed:.2f} 秒")
                     print(f"⏱️ 耗时：{elapsed:.2f} 秒")
-                    print(f"{answer}\n")
+                    print(f"\n回答:\n{answer}\n")
 
             except KeyboardInterrupt:
                 break

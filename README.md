@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **双路混合检索**：FAISS 向量检索（BAAI/bge-small-zh-v1.5）+ BM25 关键词检索，通过 RRF（Reciprocal Rank Fusion）去重融合，兼顾语义和关键词召回
+- **三级检索排序**：FAISS 向量检索（BAAI/bge-small-zh-v1.5）+ BM25 关键词检索，经 RRF 融合后，默认使用 Qwen3-Reranker-0.6B 对候选精排，兼顾速度、术语命中与语义相关性
 - **分结构切块**：Markdown 标题层级优先切块 + 递归字符切块，父子分块反查保留大段原文
 - **三阶段流式问答**：Query 路由分类（list/detail/general）→ 智能重写 → 生成，可选择流式/非流式输出
 - **离线友好**：Embedding 模型走 langchain-huggingface 本地缓存，不依赖 HF_HUB_OFFLINE 环境变量
@@ -22,7 +22,7 @@
 | RAG 框架 | LangChain 0.3.26（LCEL 语法） |
 | 向量库 | FAISS-CPU |
 | Embedding 模型 | BAAI/bge-small-zh-v1.5（512 维，~100MB） |
-| LLM | glm-5.3-flash（AIHUBMIX OpenAI 兼容接口） |
+| LLM | deepseek-v4-flash（北邮校内大模型网关 OpenAI 兼容接口） |
 | BM25 | rank_bm25 0.2.2 |
 | 混合重排 | RRF（k=60，chunk_id 去重+MD5 兜底 |
 | Temperature | 0.3（硬锁，不随用户输入变化 |
@@ -75,10 +75,10 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-然后编辑 `.env`，填入你的 AIHUBMIX Key：
+然后编辑 `.env`，填入你的北邮 API Key（校外访问请先连接北邮 VPN）：
 
 ```env
-AIHUBMIX_API_KEY=sk-xxxxxxxxxxxxxxxx
+BUPT_API_KEY=sk-xxxxxxxxxxxxxxxx
 ```
 
 ### 3. 启动
@@ -120,7 +120,7 @@ python main.py
 | 问题 | 解决 |
 |---|---|
 | ModuleNotFound: `langchain_openai` 或 `rank_bm25` | 重新在 `code/` 目录执行 `pip install -r requirements.txt` 确保完整安装 |
-| `.env` 中 Key 找不到 API Key | 检查 `code/.env` 是否存在且 `AIHUBMIX_API_KEY` 是否正确填写 |
+| `.env` 中 Key 找不到 API Key | 检查 `code/.env` 是否存在且 `BUPT_API_KEY` 是否正确填写（校外请先连北邮 VPN） |
 | 索引建好后如何重新建库 | 直接删除 `vector_index/` 文件夹，重新 `python main.py` |
 
 ---
